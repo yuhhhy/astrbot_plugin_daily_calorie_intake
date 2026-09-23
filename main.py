@@ -12,7 +12,11 @@ import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.core.utils.session_waiter import SessionController, session_waiter
+from astrbot.core.utils.session_waiter import (
+    SessionController,
+    SessionFilter,
+    session_waiter,
+)
 
 ACTIVITY_LEVELS = {
     "1": ("久坐（很少运动）", 1.2),
@@ -23,6 +27,22 @@ ACTIVITY_LEVELS = {
 }
 
 GOALS = {"1": "减重", "2": "维持", "3": "增重"}
+
+
+class CalorieUserSessionFilter(SessionFilter):
+    """Keep interactive calorie sessions isolated by platform user."""
+
+    def filter(self, event: AstrMessageEvent) -> str:
+        """Return the stable per-user interactive session ID.
+
+        Args:
+            event: Current message event.
+
+        Returns:
+            Session ID combining the platform instance and sender.
+        """
+        sender = event.get_sender_id() or event.unified_msg_origin
+        return f"daily-calorie:{event.get_platform_id()}:{sender}"
 
 
 def calculate_targets(
@@ -117,7 +137,7 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
     "astrbot_plugin_daily_calorie_intake",
     "yuhhhy",
     "通过多模态模型估算并记录每日热量摄入",
-    "1.1.0",
+    "1.1.1",
 )
 class DailyCalorieIntakePlugin(Star):
     """Track per-user calorie targets and food-image estimates."""
@@ -342,7 +362,7 @@ class DailyCalorieIntakePlugin(Star):
             controller.stop()
 
         try:
-            await profile_waiter(event)
+            await profile_waiter(event, session_filter=CalorieUserSessionFilter())
         except TimeoutError:
             yield event.plain_result("建立档案已超时，请发送 /热量 开始 重新填写。")
         finally:
@@ -490,7 +510,7 @@ class DailyCalorieIntakePlugin(Star):
             controller.keep(timeout=180, reset_timeout=True)
 
         try:
-            await config_waiter(event)
+            await config_waiter(event, session_filter=CalorieUserSessionFilter())
         except TimeoutError:
             yield event.plain_result("配置对话已超时；已完成的修改均已保存。")
         finally:
@@ -635,7 +655,7 @@ class DailyCalorieIntakePlugin(Star):
             controller.stop()
 
         try:
-            await undo_waiter(event)
+            await undo_waiter(event, session_filter=CalorieUserSessionFilter())
         except TimeoutError:
             yield event.plain_result("撤销选择已超时，没有删除任何记录。")
         finally:
@@ -705,6 +725,8 @@ class DailyCalorieIntakePlugin(Star):
             selector(string): 记录 ID、当天显示编号或足以唯一定位的描述。
             date(string): 记录日期，使用 today 表示今天，或使用 YYYY-MM-DD。
         """
+        if not selector.strip():
+            return "未指定要撤销的记录。请先调用 list_daily_calorie_records。"
         if date.lower() in {"today", "今天"}:
             date = datetime.now().astimezone().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -765,23 +787,20 @@ class DailyCalorieIntakePlugin(Star):
             event.stop_event()
             return
 
-        provider = await self.context.get_using_provider_async(event.unified_msg_origin)
-        if not provider:
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(
+                event.unified_msg_origin
+            )
+        except Exception as exc:
+            logger.exception("Failed to resolve chat provider: %s", exc)
             event.stop_event()
             yield event.plain_result("没有可用的聊天模型，无法分析食物图片。")
-            return
-        modalities = provider.provider_config.get("modalities")
-        if isinstance(modalities, list) and modalities and "image" not in modalities:
-            event.stop_event()
-            yield event.plain_result(
-                "当前聊天模型未声明图片输入能力。请切换到支持多模态图片的模型后再试。"
-            )
             return
 
         try:
             image_paths = [await image.convert_to_file_path() for image in images]
             response = await self.context.llm_generate(
-                chat_provider_id=provider.meta().id,
+                chat_provider_id=provider_id,
                 image_urls=image_paths,
                 prompt=(
                     "分析这些图片是否展示了发送者已经食用或准备食用的一餐。"
@@ -826,6 +845,12 @@ class DailyCalorieIntakePlugin(Star):
         async with self._locks.setdefault(key, asyncio.Lock()):
             state = await self._load_state(event)
             if not state["recording_enabled"]:
+                return
+            if source_message_id and any(
+                saved.get("source_message_id") == source_message_id
+                for saved in state["entries"]
+            ):
+                event.stop_event()
                 return
             state["entries"].append(entry)
             state["entries"] = state["entries"][-1000:]
