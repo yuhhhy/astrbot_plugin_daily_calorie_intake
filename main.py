@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import astrbot.api.message_components as Comp
@@ -27,6 +27,36 @@ ACTIVITY_LEVELS = {
 }
 
 GOALS = {"1": "减重", "2": "维持", "3": "增重"}
+
+# 统一使用 UTC+8（Asia/Shanghai，中国无夏令时）作为“今天”的日期边界，
+# 避免服务器时区（常见为 UTC）导致记录被划到错误的日期。
+_LOCAL_TZ = timezone(timedelta(hours=8))
+
+
+def _now() -> datetime:
+    """Return the current local datetime in the canonical timezone."""
+    return datetime.now(_LOCAL_TZ)
+
+
+def _plain_result(event: AstrMessageEvent, text: str):
+    """Build a plain-text result with Markdown disabled.
+
+    Plugin reports use plain newlines and ``#id`` tokens, which Markdown
+    renderers (e.g. QQ Official) would otherwise turn into headings or collapse
+    onto one line. Forcing plain text keeps line breaks and IDs intact.
+    """
+    return event.make_result().message(text).use_markdown(False)
+
+
+def _table_cell(value: Any) -> str:
+    """Sanitize a value for use inside a Markdown table cell."""
+    return (
+        str(value)
+        .replace("|", "｜")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .strip()
+    )
 
 
 class CalorieUserSessionFilter(SessionFilter):
@@ -245,16 +275,21 @@ class DailyCalorieIntakePlugin(Star):
         """
         await self.put_kv_data(self._state_key(event), state)
 
-    def _today_summary(self, state: dict[str, Any]) -> tuple[str, int, int]:
+    def _today_summary(
+        self, state: dict[str, Any], now: datetime | None = None
+    ) -> tuple[str, int, int]:
         """Create today's summary from stored entries.
 
         Args:
             state: Complete user state.
+            now: Optional timestamp to use as "now"; defaults to ``_now()``.
 
         Returns:
             Local date, total intake, and remaining target.
         """
-        date = datetime.now().astimezone().date().isoformat()
+        if now is None:
+            now = _now()
+        date = now.date().isoformat()
         total = sum(
             int(entry.get("calories", 0))
             for entry in state["entries"]
@@ -323,7 +358,7 @@ class DailyCalorieIntakePlugin(Star):
         ]
         answers: dict[str, Any] = {}
         step = 0
-        yield event.plain_result(
+        yield _plain_result(event,
             "我们先建立个人档案。随时发送“退出”可以取消。\n\n" + prompts[0]
         )
 
@@ -334,7 +369,7 @@ class DailyCalorieIntakePlugin(Star):
             nonlocal step
             value = next_event.message_str.strip()
             if value == "退出":
-                await next_event.send(next_event.plain_result("已取消建立档案。"))
+                await next_event.send(_plain_result(next_event, "已取消建立档案。"))
                 controller.stop()
                 return
 
@@ -371,7 +406,7 @@ class DailyCalorieIntakePlugin(Star):
                     answers["goal"] = GOALS[value]
             except (TypeError, ValueError):
                 await next_event.send(
-                    next_event.plain_result(
+                    _plain_result(next_event,
                         "输入格式不正确，请重新输入。\n" + prompts[step]
                     )
                 )
@@ -380,7 +415,7 @@ class DailyCalorieIntakePlugin(Star):
 
             step += 1
             if step < len(prompts):
-                await next_event.send(next_event.plain_result(prompts[step]))
+                await next_event.send(_plain_result(next_event, prompts[step]))
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
@@ -394,7 +429,7 @@ class DailyCalorieIntakePlugin(Star):
             )
             answers["tdee"] = tdee
             answers["target"] = target
-            answers["updated_at"] = datetime.now().astimezone().isoformat()
+            answers["updated_at"] = _now().isoformat()
             state = await self._load_state(next_event)
             state["profile"] = answers
             await self._save_state(next_event, state)
@@ -404,7 +439,7 @@ class DailyCalorieIntakePlugin(Star):
                 else ""
             )
             await next_event.send(
-                next_event.plain_result(
+                _plain_result(next_event,
                     f"档案已保存。估算每日总消耗约 {tdee} kcal，"
                     f"{answers['goal']}目标为 {target} kcal/天。{sex_note}\n"
                     "热量记录已默认开启，发送食物图片会自动分析并入账。\n"
@@ -416,7 +451,7 @@ class DailyCalorieIntakePlugin(Star):
         try:
             await profile_waiter(event, session_filter=CalorieUserSessionFilter())
         except TimeoutError:
-            yield event.plain_result("建立档案已超时，请发送 /热量 开始 重新填写。")
+            yield _plain_result(event, "建立档案已超时，请发送 /热量 开始 重新填写。")
         finally:
             event.stop_event()
 
@@ -426,9 +461,9 @@ class DailyCalorieIntakePlugin(Star):
         state = await self._load_state(event)
         profile = state["profile"]
         if not profile:
-            yield event.plain_result("尚未建立档案，请先发送 /热量 开始。")
+            yield _plain_result(event, "尚未建立档案，请先发送 /热量 开始。")
             return
-        yield event.plain_result(
+        yield _plain_result(event,
             "当前档案：\n"
             f"年龄：{profile['age']} 岁\n"
             f"身高：{profile['height_cm']} cm\n"
@@ -462,7 +497,7 @@ class DailyCalorieIntakePlugin(Star):
             nonlocal selected_field
             value = next_event.message_str.strip()
             if value in {"完成", "退出", "取消"}:
-                await next_event.send(next_event.plain_result("配置已结束。"))
+                await next_event.send(_plain_result(next_event, "配置已结束。"))
                 controller.stop()
                 return
 
@@ -481,7 +516,7 @@ class DailyCalorieIntakePlugin(Star):
                     normalized = matches[0] if len(matches) == 1 else ""
                 if normalized not in value_prompts:
                     await next_event.send(
-                        next_event.plain_result(
+                        _plain_result(next_event,
                             "我没识别出要修改的项目。请回复："
                             "年龄、身高、体重、性别、活动或目标。"
                         )
@@ -490,7 +525,7 @@ class DailyCalorieIntakePlugin(Star):
                     return
                 selected_field = normalized
                 await next_event.send(
-                    next_event.plain_result(value_prompts[selected_field])
+                    _plain_result(next_event, value_prompts[selected_field])
                 )
                 controller.keep(timeout=180, reset_timeout=True)
                 return
@@ -529,7 +564,7 @@ class DailyCalorieIntakePlugin(Star):
                     profile["goal"] = parsed
             except (TypeError, ValueError):
                 await next_event.send(
-                    next_event.plain_result(
+                    _plain_result(next_event,
                         "输入值无效，请重新输入。\n" + value_prompts[selected_field]
                     )
                 )
@@ -547,7 +582,7 @@ class DailyCalorieIntakePlugin(Star):
             )
             profile["tdee"] = tdee
             profile["target"] = target
-            profile["updated_at"] = datetime.now().astimezone().isoformat()
+            profile["updated_at"] = _now().isoformat()
             key = self._state_key(next_event)
             async with self._locks.setdefault(key, asyncio.Lock()):
                 fresh_state = await self._load_state(next_event)
@@ -555,7 +590,7 @@ class DailyCalorieIntakePlugin(Star):
                 await self._save_state(next_event, fresh_state)
             selected_field = None
             await next_event.send(
-                next_event.plain_result(
+                _plain_result(next_event,
                     f"已更新{changed_field}并自动重算：TDEE 约 {tdee} kcal，"
                     f"每日{profile['goal']}目标 {target} kcal。\n\n"
                     "还想修改哪一项？回复年龄、身高、体重、性别、活动或目标；"
@@ -567,7 +602,7 @@ class DailyCalorieIntakePlugin(Star):
         try:
             await config_waiter(event, session_filter=CalorieUserSessionFilter())
         except TimeoutError:
-            yield event.plain_result("配置对话已超时；已完成的修改均已保存。")
+            yield _plain_result(event, "配置对话已超时；已完成的修改均已保存。")
         finally:
             event.stop_event()
 
@@ -576,7 +611,7 @@ class DailyCalorieIntakePlugin(Star):
         """查看今日摄入和剩余热量。"""
         state = await self._load_state(event)
         if not state["profile"]:
-            yield event.plain_result("请先发送 /热量 开始 建立个人档案。")
+            yield _plain_result(event, "请先发送 /热量 开始 建立个人档案。")
             return
         date, total, remaining = self._today_summary(state)
         status = (
@@ -585,22 +620,32 @@ class DailyCalorieIntakePlugin(Star):
             else f"已超过目标约 {-remaining} kcal"
         )
         entries = [entry for entry in state["entries"] if entry.get("date") == date]
-        details = "\n".join(
-            f"{number}. #{entry['id']} {entry.get('description', '饮食记录')} "
-            f"{entry.get('calories', 0)} kcal"
-            for number, entry in enumerate(entries, start=1)
-        )
-        yield event.plain_result(
+        if entries:
+            rows = [
+                "| 编号 | 描述 | 热量 |",
+                "| --- | --- | --- |",
+            ]
+            for number, entry in enumerate(entries, start=1):
+                description = _table_cell(entry.get("description", "饮食记录"))
+                rows.append(
+                    f"| {number} | {description} | "
+                    f"{entry.get('calories', 0)} kcal |"
+                )
+            details = "\n".join(rows)
+        else:
+            details = ""
+        summary = (
             f"{date} 已记录 {total} kcal，目标 {state['profile']['target']} kcal，"
             f"{status}。"
-            + (f"\n\n今日明细：\n{details}" if details else "\n今天还没有饮食记录。")
         )
+        body = f"\n\n{details}" if details else "\n今天还没有饮食记录。"
+        yield event.make_result().message(summary + body).use_markdown(True)
 
     @calorie.command("记录")
     async def record(self, event: AstrMessageEvent, calories: int):
         """手动记录一笔热量。"""
         if not 1 <= calories <= 10000:
-            yield event.plain_result("单次热量请输入 1～10000 之间的整数。")
+            yield _plain_result(event, "单次热量请输入 1～10000 之间的整数。")
             return
         key = self._state_key(event)
         async with self._locks.setdefault(key, asyncio.Lock()):
@@ -610,7 +655,7 @@ class DailyCalorieIntakePlugin(Star):
             elif not state["recording_enabled"]:
                 result = "热量记录当前已关闭。发送 /自动记录 开启 后再记录。"
             else:
-                now = datetime.now().astimezone()
+                now = _now()
                 state["entries"].append(
                     {
                         "id": uuid.uuid4().hex[:8],
@@ -623,24 +668,24 @@ class DailyCalorieIntakePlugin(Star):
                 )
                 state["entries"] = state["entries"][-1000:]
                 await self._save_state(event, state)
-                _, total, remaining = self._today_summary(state)
+                _, total, remaining = self._today_summary(state, now)
                 result = f"已记录 {calories} kcal。今日累计 {total} kcal，" + (
                     f"还可摄入约 {remaining} kcal。"
                     if remaining >= 0
                     else f"已超过目标约 {-remaining} kcal。"
                 )
-        yield event.plain_result(result)
+        yield _plain_result(event, result)
 
     @calorie.command("撤销")
     async def undo(self, event: AstrMessageEvent):
         """列出今天的记录，并通过后续对话选择要撤销的一笔。"""
         state = await self._load_state(event)
-        today = datetime.now().astimezone().date().isoformat()
+        today = _now().date().isoformat()
         entries = [entry for entry in state["entries"] if entry.get("date") == today]
         if not entries:
-            yield event.plain_result("今天还没有可撤销的热量记录。")
+            yield _plain_result(event, "今天还没有可撤销的热量记录。")
             return
-        yield event.plain_result(
+        yield _plain_result(event,
             "请选择要撤销的记录：\n"
             + "\n".join(
                 f"{number}. #{entry['id']} "
@@ -657,7 +702,7 @@ class DailyCalorieIntakePlugin(Star):
         ) -> None:
             selector = next_event.message_str.strip()
             if selector in {"取消", "退出"}:
-                await next_event.send(next_event.plain_result("已取消撤销。"))
+                await next_event.send(_plain_result(next_event, "已取消撤销。"))
                 controller.stop()
                 return
 
@@ -678,7 +723,7 @@ class DailyCalorieIntakePlugin(Star):
                     ]
                     if len(matches) > 1:
                         await next_event.send(
-                            next_event.plain_result(
+                            _plain_result(next_event,
                                 "这个描述匹配到多条记录，请回复对应编号或记录 ID。"
                             )
                         )
@@ -687,7 +732,7 @@ class DailyCalorieIntakePlugin(Star):
                 index = self._find_entry_index(current_state, selector, today)
                 if index is None:
                     await next_event.send(
-                        next_event.plain_result(
+                        _plain_result(next_event,
                             "没有找到对应记录，请回复列表中的编号、记录 ID 或描述。"
                         )
                     )
@@ -697,7 +742,7 @@ class DailyCalorieIntakePlugin(Star):
                 await self._save_state(next_event, current_state)
 
             await next_event.send(
-                next_event.plain_result(
+                _plain_result(next_event,
                     f"已撤销：{removed.get('description', '饮食记录')}，"
                     f"{removed.get('calories', 0)} kcal。"
                 )
@@ -707,7 +752,7 @@ class DailyCalorieIntakePlugin(Star):
         try:
             await undo_waiter(event, session_filter=CalorieUserSessionFilter())
         except TimeoutError:
-            yield event.plain_result("撤销选择已超时，没有删除任何记录。")
+            yield _plain_result(event, "撤销选择已超时，没有删除任何记录。")
         finally:
             event.stop_event()
 
@@ -717,14 +762,14 @@ class DailyCalorieIntakePlugin(Star):
         state = await self._load_state(event)
         if action in {"开启", "开"}:
             if not state["profile"]:
-                yield event.plain_result("请先发送 /热量 开始 建立个人档案。")
+                yield _plain_result(event, "请先发送 /热量 开始 建立个人档案。")
                 return
             key = self._state_key(event)
             async with self._locks.setdefault(key, asyncio.Lock()):
                 state = await self._load_state(event)
                 state["recording_enabled"] = True
                 await self._save_state(event, state)
-            yield event.plain_result(
+            yield _plain_result(event,
                 "热量记录已开启。手动记录和食物图片分析均可使用；"
                 "食物图片识别成功后会自动入账。"
             )
@@ -734,17 +779,17 @@ class DailyCalorieIntakePlugin(Star):
                 state = await self._load_state(event)
                 state["recording_enabled"] = False
                 await self._save_state(event, state)
-            yield event.plain_result(
+            yield _plain_result(event,
                 "热量记录已关闭。不会新增手动记录，也不会分析或记录食物图片；"
                 "已有记录仍可查询和撤销。"
             )
         elif action == "状态":
             enabled = "已开启" if state["recording_enabled"] else "已关闭"
-            yield event.plain_result(
+            yield _plain_result(event,
                 f"热量记录{enabled}；开启时食物图片会自动分析并直接入账。"
             )
         else:
-            yield event.plain_result(
+            yield _plain_result(event,
                 "用法：/自动记录 开启、/自动记录 关闭、/自动记录 状态"
             )
 
@@ -762,7 +807,7 @@ class DailyCalorieIntakePlugin(Star):
             return "用户尚未建立热量档案。"
         date = (date or "today").lower()
         if date in {"today", "今天"}:
-            date = datetime.now().astimezone().date().isoformat()
+            date = _now().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             return "日期格式无效，请使用 today 或 YYYY-MM-DD。"
         entries = [entry for entry in state["entries"] if entry.get("date") == date]
@@ -789,7 +834,7 @@ class DailyCalorieIntakePlugin(Star):
             return "未指定要撤销的记录。请先调用 list_daily_calorie_records。"
         date = (date or "today").lower()
         if date in {"today", "今天"}:
-            date = datetime.now().astimezone().date().isoformat()
+            date = _now().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             return "日期格式无效，请使用 today 或 YYYY-MM-DD。"
         key = self._state_key(event)
@@ -855,7 +900,7 @@ class DailyCalorieIntakePlugin(Star):
         except Exception as exc:
             logger.exception("Failed to resolve chat provider: %s", exc)
             event.stop_event()
-            yield event.plain_result("没有可用的聊天模型，无法分析食物图片。")
+            yield _plain_result(event, "没有可用的聊天模型，无法分析食物图片。")
             return
 
         try:
@@ -880,7 +925,7 @@ class DailyCalorieIntakePlugin(Star):
         except Exception as exc:
             logger.exception("Food image analysis failed: %s", exc)
             event.stop_event()
-            yield event.plain_result(
+            yield _plain_result(event,
                 "图片分析失败。请确认当前模型支持图片输入，或稍后重试。"
             )
             return
@@ -888,7 +933,7 @@ class DailyCalorieIntakePlugin(Star):
         if not analysis["is_food"]:
             return
 
-        now = datetime.now().astimezone()
+        now = _now()
         entry = {
             "id": uuid.uuid4().hex[:8],
             "date": now.date().isoformat(),
@@ -917,7 +962,7 @@ class DailyCalorieIntakePlugin(Star):
             state["entries"] = state["entries"][-1000:]
             await self._save_state(event, state)
 
-        date, total, remaining = self._today_summary(state)
+        date, total, remaining = self._today_summary(state, now)
         today_entries = [
             {
                 "description": saved.get("description", "饮食记录"),
@@ -984,10 +1029,10 @@ class DailyCalorieIntakePlugin(Star):
                 chat_provider_id=provider_id,
                 prompt=reply_prompt,
             )
-            await event.send(event.plain_result(reply.completion_text.strip()))
+            await event.send(_plain_result(event, reply.completion_text.strip()))
         except Exception as exc:
             logger.exception("Failed to generate calorie reply: %s", exc)
-            await event.send(event.plain_result("已记录这次饮食，但 AI 回复生成失败。"))
+            await event.send(_plain_result(event, "已记录这次饮食，但 AI 回复生成失败。"))
 
     async def terminate(self) -> None:
         """Release in-memory synchronization primitives on plugin shutdown."""
