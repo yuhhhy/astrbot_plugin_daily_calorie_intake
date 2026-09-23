@@ -1,7 +1,7 @@
 name: astrbot_plugin_daily_calorie_intake
 display_name: 每日热量助手
 desc: 使用多模态模型识别食物图片，记录每日热量摄入并计算剩余额度。
-version: 1.1.1
+version: 1.2.0
 author: yuhhhy
 repo: https://github.com/yuhhhy/astrbot_plugin_daily_calorie_intake
 astrbot_version: ">=4.9.2"

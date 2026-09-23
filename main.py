@@ -137,7 +137,7 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
     "astrbot_plugin_daily_calorie_intake",
     "yuhhhy",
     "通过多模态模型估算并记录每日热量摄入",
-    "1.1.1",
+    "1.2.0",
 )
 class DailyCalorieIntakePlugin(Star):
     """Track per-user calorie targets and food-image estimates."""
@@ -856,28 +856,75 @@ class DailyCalorieIntakePlugin(Star):
             state["entries"] = state["entries"][-1000:]
             await self._save_state(event, state)
 
-        event.stop_event()
-        confidence_text = {"high": "较高", "medium": "中等", "low": "较低"}[
-            analysis["confidence"]
+        date, total, remaining = self._today_summary(state)
+        today_entries = [
+            {
+                "description": saved.get("description", "饮食记录"),
+                "calories": int(saved.get("calories", 0)),
+            }
+            for saved in state["entries"]
+            if saved.get("date") == date
         ]
-        estimate = (
-            f"识别为：{analysis['description']}\n"
-            f"估算 {analysis['calories']} kcal，合理范围 "
-            f"{analysis['lower_bound']}～{analysis['upper_bound']} kcal，"
-            f"置信度{confidence_text}。"
+        reply_context = {
+            "profile": state["profile"],
+            "latest_food_analysis": analysis,
+            "today_entries": today_entries,
+            "today_total_calories": total,
+            "daily_target_calories": int(state["profile"]["target"]),
+            "remaining_calories": remaining,
+            "user_message_with_image": (event.message_str or "").strip(),
+        }
+        reply_prompt = (
+            "你正在回复用户刚刚发送的食物图片。插件已完成识别和入账，"
+            "请结合当前对话上下文、你的人设以及下方精确数据，直接生成最终回复。"
+            "回复必须自然、简洁并个性化，说明识别到的食物、估算热量与范围、"
+            "主要不确定因素、已自动记录、今日累计和剩余或超出热量，"
+            "再根据用户的目标和当日记录给出一条有用的建议或鼓励。"
+            "不得修改、重算或编造下方数字，不要输出 JSON、标题或分析过程。"
+            "热量仅为日常估算，不要做医疗诊断。\n\n"
+            f"插件数据：{json.dumps(reply_context, ensure_ascii=False)}"
         )
-        if analysis["notes"]:
-            estimate += f"\n主要不确定因素：{analysis['notes']}"
-        _, total, remaining = self._today_summary(state)
-        yield event.plain_result(
-            estimate
-            + f"\n已自动记录。今日累计 {total} kcal，"
-            + (
-                f"还可摄入约 {remaining} kcal。"
-                if remaining >= 0
-                else f"已超过目标约 {-remaining} kcal。"
+
+        conversation_id = None
+        conversation = None
+        try:
+            conversation_id = (
+                await self.context.conversation_manager.get_curr_conversation_id(
+                    event.unified_msg_origin
+                )
             )
-        )
+            if not conversation_id:
+                conversation_id = (
+                    await self.context.conversation_manager.new_conversation(
+                        event.unified_msg_origin,
+                        platform_id=event.get_platform_id(),
+                    )
+                )
+            conversation = await self.context.conversation_manager.get_conversation(
+                event.unified_msg_origin,
+                conversation_id,
+            )
+        except Exception as exc:
+            logger.exception("Failed to load calorie reply context: %s", exc)
+
+        event.stop_event()
+        if conversation:
+            yield event.request_llm(
+                prompt=reply_prompt,
+                session_id=conversation_id or "",
+                conversation=conversation,
+            )
+            return
+
+        try:
+            reply = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=reply_prompt,
+            )
+            yield event.plain_result(reply.completion_text.strip())
+        except Exception as exc:
+            logger.exception("Failed to generate calorie reply: %s", exc)
+            yield event.plain_result("已记录这次饮食，但 AI 回复生成失败。")
 
     async def terminate(self) -> None:
         """Release in-memory synchronization primitives on plugin shutdown."""
