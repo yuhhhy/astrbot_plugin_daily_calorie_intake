@@ -624,13 +624,10 @@ class DailyCalorieIntakePlugin(Star):
                 state["entries"] = state["entries"][-1000:]
                 await self._save_state(event, state)
                 _, total, remaining = self._today_summary(state)
-                result = (
-                    f"已记录 {calories} kcal。今日累计 {total} kcal，"
-                    + (
-                        f"还可摄入约 {remaining} kcal。"
-                        if remaining >= 0
-                        else f"已超过目标约 {-remaining} kcal。"
-                    )
+                result = f"已记录 {calories} kcal。今日累计 {total} kcal，" + (
+                    f"还可摄入约 {remaining} kcal。"
+                    if remaining >= 0
+                    else f"已超过目标约 {-remaining} kcal。"
                 )
         yield event.plain_result(result)
 
@@ -971,7 +968,9 @@ class DailyCalorieIntakePlugin(Star):
         except Exception as exc:
             logger.exception("Failed to load calorie reply context: %s", exc)
 
-        event.stop_event()
+        # The request itself must continue through AstrBot's result pipeline;
+        # stopping the event here would suppress the generated reply.
+        event.call_llm = True
         if conversation:
             yield event.request_llm(
                 prompt=reply_prompt,
@@ -985,10 +984,10 @@ class DailyCalorieIntakePlugin(Star):
                 chat_provider_id=provider_id,
                 prompt=reply_prompt,
             )
-            yield event.plain_result(reply.completion_text.strip())
+            await event.send(event.plain_result(reply.completion_text.strip()))
         except Exception as exc:
             logger.exception("Failed to generate calorie reply: %s", exc)
-            yield event.plain_result("已记录这次饮食，但 AI 回复生成失败。")
+            await event.send(event.plain_result("已记录这次饮食，但 AI 回复生成失败。"))
 
     async def terminate(self) -> None:
         """Release in-memory synchronization primitives on plugin shutdown."""
