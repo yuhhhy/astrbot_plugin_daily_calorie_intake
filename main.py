@@ -91,6 +91,44 @@ def calculate_targets(
     return tdee, target
 
 
+def _coerce_int(value: Any) -> int:
+    """Coerce a model-provided numeric value to an int.
+
+    Accepts ``int``, ``float`` and numeric strings, rounding floats to the
+    nearest whole calorie. Raises ``ValueError`` for anything else.
+    """
+    if isinstance(value, bool):
+        raise ValueError("Expected a number, got a boolean")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Expected a number, got an empty string")
+        try:
+            return round(float(stripped))
+        except ValueError:
+            raise ValueError(f"Expected a number, got {value!r}") from None
+    raise ValueError(f"Expected a number, got {type(value).__name__}")
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Coerce a model-provided boolean-ish value to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in {"true", "yes", "y", "1"}:
+            return True
+        if stripped in {"false", "no", "n", "0"}:
+            return False
+    raise ValueError("Missing is_food")
+
+
 def parse_food_analysis(text: str) -> dict[str, Any]:
     """Parse and validate the model's food analysis JSON.
 
@@ -107,19 +145,22 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
     if not match:
         raise ValueError("The model did not return a JSON object")
     payload = json.loads(match.group(0))
-    if not isinstance(payload.get("is_food"), bool):
-        raise ValueError("Missing is_food")
-    if not payload["is_food"]:
+    if not isinstance(payload, dict):
+        raise ValueError("The model did not return a JSON object")
+    is_food = _coerce_bool(payload.get("is_food"))
+    if not is_food:
         return {"is_food": False}
 
-    calories = int(payload["calories"])
-    lower = int(payload.get("lower_bound", calories))
-    upper = int(payload.get("upper_bound", calories))
+    calories = _coerce_int(payload.get("calories"))
+    lower_raw = payload.get("lower_bound")
+    upper_raw = payload.get("upper_bound")
+    lower = _coerce_int(lower_raw) if lower_raw is not None else calories
+    upper = _coerce_int(upper_raw) if upper_raw is not None else calories
     if not 1 <= calories <= 10000:
         raise ValueError("Calories are outside the supported range")
     if lower > calories or upper < calories:
         raise ValueError("Invalid calorie range")
-    confidence = str(payload.get("confidence", "low")).lower()
+    confidence = str(payload.get("confidence") or "low").lower()
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
     return {
@@ -137,7 +178,7 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
     "astrbot_plugin_daily_calorie_intake",
     "yuhhhy",
     "通过多模态模型估算并记录每日热量摄入",
-    "1.2.0",
+    "1.2.1",
 )
 class DailyCalorieIntakePlugin(Star):
     """Track per-user calorie targets and food-image estimates."""
@@ -172,20 +213,27 @@ class DailyCalorieIntakePlugin(Star):
         state = await self.get_kv_data(self._state_key(event), {})
         if not isinstance(state, dict):
             state = {}
-        state.setdefault("profile", None)
+        if not isinstance(state.get("profile"), dict):
+            state["profile"] = None
         if "recording_enabled" not in state:
             state["recording_enabled"] = True
         state.pop("auto_record", None)
-        state.setdefault("entries", [])
+        if not isinstance(state.get("entries"), list):
+            state["entries"] = []
         state.pop("auto_mode", None)
         state.pop("pending", None)
         for entry in state["entries"]:
+            if not isinstance(entry, dict):
+                continue
             if not entry.get("id"):
                 seed = (
                     f"{entry.get('created_at', '')}:{entry.get('description', '')}:"
                     f"{entry.get('calories', 0)}"
                 )
                 entry["id"] = hashlib.sha256(seed.encode()).hexdigest()[:8]
+        state["entries"] = [
+            entry for entry in state["entries"] if isinstance(entry, dict)
+        ]
         return state
 
     async def _save_state(self, event: AstrMessageEvent, state: dict[str, Any]) -> None:
@@ -212,7 +260,11 @@ class DailyCalorieIntakePlugin(Star):
             for entry in state["entries"]
             if entry.get("date") == date
         )
-        target = int(state["profile"]["target"])
+        profile = state.get("profile")
+        try:
+            target = int(profile.get("target", 0)) if isinstance(profile, dict) else 0
+        except (TypeError, ValueError):
+            target = 0
         return date, total, target - total
 
     def _find_entry_index(
@@ -496,8 +548,11 @@ class DailyCalorieIntakePlugin(Star):
             profile["tdee"] = tdee
             profile["target"] = target
             profile["updated_at"] = datetime.now().astimezone().isoformat()
-            state["profile"] = profile
-            await self._save_state(next_event, state)
+            key = self._state_key(next_event)
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                fresh_state = await self._load_state(next_event)
+                fresh_state["profile"] = profile
+                await self._save_state(next_event, fresh_state)
             selected_field = None
             await next_event.send(
                 next_event.plain_result(
@@ -551,35 +606,33 @@ class DailyCalorieIntakePlugin(Star):
         async with self._locks.setdefault(key, asyncio.Lock()):
             state = await self._load_state(event)
             if not state["profile"]:
-                yield event.plain_result("请先发送 /热量 开始 建立个人档案。")
-                return
-            if not state["recording_enabled"]:
-                yield event.plain_result(
-                    "热量记录当前已关闭。发送 /自动记录 开启 后再记录。"
+                result = "请先发送 /热量 开始 建立个人档案。"
+            elif not state["recording_enabled"]:
+                result = "热量记录当前已关闭。发送 /自动记录 开启 后再记录。"
+            else:
+                now = datetime.now().astimezone()
+                state["entries"].append(
+                    {
+                        "id": uuid.uuid4().hex[:8],
+                        "date": now.date().isoformat(),
+                        "created_at": now.isoformat(),
+                        "description": "手动记录",
+                        "calories": calories,
+                        "source": "manual",
+                    }
                 )
-                return
-            now = datetime.now().astimezone()
-            state["entries"].append(
-                {
-                    "id": uuid.uuid4().hex[:8],
-                    "date": now.date().isoformat(),
-                    "created_at": now.isoformat(),
-                    "description": "手动记录",
-                    "calories": calories,
-                    "source": "manual",
-                }
-            )
-            state["entries"] = state["entries"][-1000:]
-            await self._save_state(event, state)
-            _, total, remaining = self._today_summary(state)
-        yield event.plain_result(
-            f"已记录 {calories} kcal。今日累计 {total} kcal，"
-            + (
-                f"还可摄入约 {remaining} kcal。"
-                if remaining >= 0
-                else f"已超过目标约 {-remaining} kcal。"
-            )
-        )
+                state["entries"] = state["entries"][-1000:]
+                await self._save_state(event, state)
+                _, total, remaining = self._today_summary(state)
+                result = (
+                    f"已记录 {calories} kcal。今日累计 {total} kcal，"
+                    + (
+                        f"还可摄入约 {remaining} kcal。"
+                        if remaining >= 0
+                        else f"已超过目标约 {-remaining} kcal。"
+                    )
+                )
+        yield event.plain_result(result)
 
     @calorie.command("撤销")
     async def undo(self, event: AstrMessageEvent):
@@ -669,15 +722,21 @@ class DailyCalorieIntakePlugin(Star):
             if not state["profile"]:
                 yield event.plain_result("请先发送 /热量 开始 建立个人档案。")
                 return
-            state["recording_enabled"] = True
-            await self._save_state(event, state)
+            key = self._state_key(event)
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                state = await self._load_state(event)
+                state["recording_enabled"] = True
+                await self._save_state(event, state)
             yield event.plain_result(
                 "热量记录已开启。手动记录和食物图片分析均可使用；"
                 "食物图片识别成功后会自动入账。"
             )
         elif action in {"关闭", "关"}:
-            state["recording_enabled"] = False
-            await self._save_state(event, state)
+            key = self._state_key(event)
+            async with self._locks.setdefault(key, asyncio.Lock()):
+                state = await self._load_state(event)
+                state["recording_enabled"] = False
+                await self._save_state(event, state)
             yield event.plain_result(
                 "热量记录已关闭。不会新增手动记录，也不会分析或记录食物图片；"
                 "已有记录仍可查询和撤销。"
@@ -693,7 +752,9 @@ class DailyCalorieIntakePlugin(Star):
             )
 
     @filter.llm_tool(name="list_daily_calorie_records")
-    async def list_records_tool(self, event: AstrMessageEvent, date: str) -> str:
+    async def list_records_tool(
+        self, event: AstrMessageEvent, date: str = "today"
+    ) -> str:
         """列出指定日期的热量记录，供查询或撤销前定位记录。
 
         Args:
@@ -702,7 +763,8 @@ class DailyCalorieIntakePlugin(Star):
         state = await self._load_state(event)
         if not state["profile"]:
             return "用户尚未建立热量档案。"
-        if date.lower() in {"today", "今天"}:
+        date = (date or "today").lower()
+        if date in {"today", "今天"}:
             date = datetime.now().astimezone().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             return "日期格式无效，请使用 today 或 YYYY-MM-DD。"
@@ -717,7 +779,7 @@ class DailyCalorieIntakePlugin(Star):
 
     @filter.llm_tool(name="undo_daily_calorie_record")
     async def undo_record_tool(
-        self, event: AstrMessageEvent, selector: str, date: str
+        self, event: AstrMessageEvent, selector: str = "", date: str = "today"
     ) -> str:
         """撤销用户明确指定的一条热量记录，含糊时应先列出记录。
 
@@ -725,9 +787,11 @@ class DailyCalorieIntakePlugin(Star):
             selector(string): 记录 ID、当天显示编号或足以唯一定位的描述。
             date(string): 记录日期，使用 today 表示今天，或使用 YYYY-MM-DD。
         """
-        if not selector.strip():
+        selector = (selector or "").strip()
+        if not selector:
             return "未指定要撤销的记录。请先调用 list_daily_calorie_records。"
-        if date.lower() in {"today", "今天"}:
+        date = (date or "today").lower()
+        if date in {"today", "今天"}:
             date = datetime.now().astimezone().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             return "日期格式无效，请使用 today 或 YYYY-MM-DD。"
