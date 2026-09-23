@@ -1,14 +1,35 @@
-# astrbot-plugin-helloworld
+# 每日热量助手
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+一个使用 AstrBot 当前聊天模型多模态能力分析食物图片、记录每日摄入并计算剩余热量的插件。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 使用要求
 
-# Supports
+- AstrBot 4.9.2 或更高版本。
+- 当前会话必须配置支持图片输入的多模态聊天模型。
+- 图片识别结果只是估算，不替代医生或营养师建议。
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 使用方法
+
+1. 发送 `/热量 开始`，依次填写年龄、身高、体重、生理性别、活动水平和目标。
+2. 发送食物图片，插件会调用当前会话的多模态模型进行分析并自动入账。
+
+完成建档后热量记录默认开启。`/自动记录 关闭` 会暂停所有新增记录，
+包括手动记录和食物图片分析，但不会删除历史数据。
+
+## 指令
+
+- `/热量 开始`：首次创建个人档案。
+- `/热量 配置`：进入配置对话，按提示修改年龄、身高、体重、性别、活动或目标；每次修改后自动重算 TDEE 和目标，回复“完成”退出。
+- `/热量 今天`：查看今日摄入、剩余额度和带编号的明细。
+- `/热量 记录 500`：手动记录 500 kcal。
+- `/热量 撤销`：列出今天的记录，在后续对话中选择要撤销的一笔。
+- `/自动记录 开启`：开启整个插件的新增热量记录。
+- `/自动记录 关闭`：暂停整个插件的新增热量记录。
+- `/自动记录 状态`：查看当前设置。
+
+插件还向 AI 注册了查询与撤销工具，因此也可以直接说“列出今天的饮食记录”
+或“撤销今天午餐那条”。如果描述有歧义，AI 应先列出记录，再按记录 ID 撤销。
+
+## 隐私与存储
+
+插件只保存用户档案、热量估算和消息 ID，不保存食物图片。数据使用 AstrBot 的插件 KV 存储，并按平台实例和发送者隔离。
