@@ -38,12 +38,16 @@ def format_macros_cell(entry: dict[str, Any]) -> str:
     return f"{protein:g}/{carbs:g}/{fat:g} g"
 
 
-def day_report(state: dict[str, Any], date: str) -> str:
+def day_report(state: dict[str, Any], date: str, today: str) -> str:
     """生成某一天的摄入报告（汇总 + 营养素小计 + Markdown 表格明细）。
+
+    剩余额度只对“今天”有意义：今天显示 还可摄入/已超过；
+    过去的日期显示 缺口（低于目标）或多出（高于目标）。
 
     Args:
         state: 完整用户状态（调用方需已确认档案存在）。
-        date: ISO 日期字符串（YYYY-MM-DD）。
+        date: 要报告的 ISO 日期字符串（YYYY-MM-DD）。
+        today: 今天的 ISO 日期字符串，用于区分“今天”与“过去”。
 
     Returns:
         可直接发送的报告文本（配合 Markdown 渲染）。
@@ -52,11 +56,18 @@ def day_report(state: dict[str, Any], date: str) -> str:
     total = sum(int(entry.get("calories", 0)) for entry in entries)
     target = int(state["profile"]["target"])
     remaining = target - total
-    status = (
-        f"还可摄入约 {remaining} kcal"
-        if remaining >= 0
-        else f"已超过目标约 {-remaining} kcal"
-    )
+    if date == today:
+        # 今天还可能继续进食，保留“还可摄入”的实时额度。
+        status = (
+            f"还可摄入约 {remaining} kcal"
+            if remaining >= 0
+            else f"已超过目标约 {-remaining} kcal"
+        )
+    elif remaining >= 0:
+        # 过去的日子不能“补吃”，低于目标描述为缺口。
+        status = f"缺口约 {remaining} kcal"
+    else:
+        status = f"超标约 {-remaining} kcal"
     if entries:
         # 有记录时用 Markdown 表格输出明细；编号仅用于本次展示，不对应记录 ID。
         # 营养素列显示 蛋白/碳水/脂肪 克数；旧记录没有该数据时显示 -。
@@ -88,6 +99,52 @@ def day_report(state: dict[str, Any], date: str) -> str:
         f"{date} 已记录 {total} kcal，目标 {target} kcal，{status}。{macro_summary}"
     )
     return summary + body
+
+
+def weekly_report(stats: dict[str, Any]) -> str:
+    """渲染摄入周报（Markdown）。
+
+    Args:
+        stats: :func:`core.stats.weekly_stats` 的返回值。
+
+    Returns:
+        可直接发送的 Markdown 报告文本。
+    """
+    trend_text = {
+        "up": "↑ 近几天比之前吃得更多",
+        "down": "↓ 近几天比之前吃得更少",
+        "flat": "→ 摄入量基本持平",
+    }[stats["trend"]]
+    lines = [
+        f"📊 摄入周报（{stats['start_date']} ～ {stats['end_date']}）",
+        "",
+        f"累计 {stats['total']} kcal，日均 {stats['daily_avg']} kcal"
+        f"（目标 {stats['target']} kcal）。",
+        f"记录 {stats['recorded_days']}/{stats['days']} 天，"
+        f"达标 {stats['on_target_days']} 天。",
+    ]
+    if stats["best_day"]:
+        lines.append(
+            f"最高的一天：{stats['best_day']['date'][5:]}"
+            f"（{stats['best_day']['total']} kcal）。"
+        )
+    lines.append(
+        f"趋势：{trend_text}"
+        f"（近 3 天日均 {stats['recent_avg']} kcal，"
+        f"此前日均 {stats['earlier_avg']} kcal）。"
+    )
+    lines.append("")
+    lines.append("| 日期 | 摄入 | 达标 |")
+    lines.append("| --- | --- | --- |")
+    for day in stats["per_day"]:
+        if not day["recorded"]:
+            mark = "—"
+        else:
+            mark = "✅" if day["total"] <= stats["target"] else "❌"
+        lines.append(f"| {day['date'][5:]} | {day['total']} kcal | {mark} |")
+    lines.append("")
+    lines.append("达标 = 当日摄入不超过目标；— 表示当天没有记录。")
+    return "\n".join(lines)
 
 
 def build_text_bill(entries: list[dict[str, Any]]) -> str:

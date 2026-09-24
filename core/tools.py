@@ -21,6 +21,7 @@ from .constants import (
 )
 from .llm_parsing import coerce_int, normalize_macro_grams
 from .state_store import resolve_date
+from .stats import weekly_stats
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
@@ -149,6 +150,50 @@ async def list_records(
         f"{number}. id={entry['id']}；{entry.get('description', '饮食记录')}；"
         f"{entry.get('calories', 0)} kcal"
         for number, entry in enumerate(entries, start=1)
+    )
+
+
+async def weekly_stats_summary(
+    event: AstrMessageEvent,
+    *,
+    store: UserStateStore,
+    now: CallableNow,
+    days: Any,
+) -> str:
+    """汇总最近若干天的摄入统计（get_weekly_stats 工具）。"""
+    state = await store.load(event)
+    if not state["profile"]:
+        return "用户尚未建立热量档案。"
+    # 天数容错：无法解析时回退 7 天，函数内再钳制到 1～30。
+    try:
+        days = coerce_int(days)
+    except ValueError:
+        days = 7
+
+    stats = weekly_stats(state, now().date().isoformat(), days)
+    if stats["recorded_days"] == 0:
+        return (
+            f"最近 {stats['days']} 天（{stats['start_date']} ～ "
+            f"{stats['end_date']}）没有热量记录。"
+        )
+    trend_text = {
+        "up": "近几天比之前吃得更多",
+        "down": "近几天比之前吃得更少",
+        "flat": "摄入量基本持平",
+    }[stats["trend"]]
+    best_text = ""
+    if stats["best_day"]:
+        best_text = (
+            f"，最高的一天是 {stats['best_day']['date']}"
+            f"（{stats['best_day']['total']} kcal）"
+        )
+    return (
+        f"最近 {stats['days']} 天（{stats['start_date']} ～ {stats['end_date']}）"
+        f"累计 {stats['total']} kcal，日均 {stats['daily_avg']} kcal，"
+        f"目标 {stats['target']} kcal；记录 {stats['recorded_days']}/{stats['days']} 天，"
+        f"达标 {stats['on_target_days']} 天（当日摄入不超过目标）{best_text}；"
+        f"趋势：{trend_text}"
+        f"（近 3 天日均 {stats['recent_avg']} kcal，此前日均 {stats['earlier_avg']} kcal）。"
     )
 
 

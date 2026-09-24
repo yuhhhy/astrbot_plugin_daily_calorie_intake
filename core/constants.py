@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+# 插件标识（与 @register 的插件名一致），也用于 cron 任务的归属标记
+PLUGIN_ID = "astrbot_plugin_daily_calorie_intake"
+
 # 活动水平：选项编号 → (展示名称, 基础代谢放大系数)
 ACTIVITY_LEVELS = {
     "1": ("久坐（很少运动）", 1.2),
@@ -58,3 +61,8 @@ MAX_MACRO_GRAMS = 1000
 
 # 文本版账单（文件发送失败降级）最多展示的记录条数，避免刷屏
 TEXT_BILL_MAX_ENTRIES = 20
+
+# 订阅提醒默认值（可在 WebUI 插件配置中覆盖）
+DEFAULT_SUMMARY_TIME = "21:00"  # 每日总结的默认时间
+DEFAULT_WEIGHT_CHECK_WEEKDAY = 7  # 每周体重检查日：1=周一 … 7=周日
+DEFAULT_WEIGHT_CHECK_THRESHOLD = 3500  # 累计缺口/超标达到该值才提示更新体重（kcal）

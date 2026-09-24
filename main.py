@@ -36,23 +36,27 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .core import image_flow, interactive, tools
+from .core.constants import PLUGIN_ID
 from .core.reply_ui import (
     build_text_bill,
     day_report,
     plain_result,
+    weekly_report,
     write_export_csv,
 )
+from .core.scheduler import ReminderService
 from .core.state_store import UserStateStore, resolve_date
+from .core.stats import weekly_stats
 
 # “今天”的日期边界默认使用 UTC+8（Asia/Shanghai，中国无夏令时），避免服务器时区
 # （常见为 UTC）导致记录被划到错误的日期；可在 WebUI 插件配置中调整时区偏移。
 
 
 @register(
-    "astrbot_plugin_daily_calorie_intake",
+    PLUGIN_ID,
     "yuhhhy",
     "通过多模态模型与对话描述估算并记录每日热量摄入",
-    "1.4.0",
+    "1.4.1",
 )
 class DailyCalorieIntakePlugin(Star):
     """按用户维护热量档案，自动识别食物图片与文字描述并记录每日摄入。
@@ -72,7 +76,15 @@ class DailyCalorieIntakePlugin(Star):
             put_kv_data=self.put_kv_data,
             delete_kv_data=self.delete_kv_data,
             config_value=self._config_value,
-            now=self._now,
+            # 用 lambda 延迟查找，保证每次取到的是当前的 _now（时区配置实时生效）
+            now=lambda: self._now(),
+        )
+        # 定时提醒（cron 注册/恢复、主动推送与补发）委托给 ReminderService。
+        self.reminders = ReminderService(
+            context=context,
+            store=self.store,
+            config_value=self._config_value,
+            now=lambda: self._now(),
         )
 
     def _config_value(self, key: str, default: Any) -> Any:
@@ -121,7 +133,11 @@ class DailyCalorieIntakePlugin(Star):
             yield plain_result(event, "请先发送 /热量 开始 建立个人档案。")
             return
         today = self._now().date().isoformat()
-        yield event.make_result().message(day_report(state, today)).use_markdown(True)
+        yield (
+            event.make_result()
+            .message(day_report(state, today, today))
+            .use_markdown(True)
+        )
 
     @calorie.command("查询")
     async def query_date(self, event: AstrMessageEvent, date: str = ""):
@@ -130,6 +146,7 @@ class DailyCalorieIntakePlugin(Star):
         if not state["profile"]:
             yield plain_result(event, "请先发送 /热量 开始 建立个人档案。")
             return
+        today = self._now().date().isoformat()
         try:
             target_date = resolve_date(date, self._now())
         except ValueError:
@@ -139,11 +156,41 @@ class DailyCalorieIntakePlugin(Star):
                 "例如 /热量 查询 2025-09-20。",
             )
             return
+        if target_date > today:
+            yield plain_result(
+                event, f"{target_date} 还没到，只能查询今天及过去的记录。"
+            )
+            return
         yield (
             event.make_result()
-            .message(day_report(state, target_date))
+            .message(day_report(state, target_date, today))
             .use_markdown(True)
         )
+
+    @calorie.command("周报")
+    async def weekly(self, event: AstrMessageEvent):
+        """查看最近 7 天的摄入统计周报。"""
+        state = await self.store.load(event)
+        if not state["profile"]:
+            yield plain_result(event, "请先发送 /热量 开始 建立个人档案。")
+            return
+        stats = weekly_stats(state, self._now().date().isoformat())
+        if stats["recorded_days"] == 0:
+            yield plain_result(
+                event,
+                f"最近 {stats['days']} 天（{stats['start_date']} ～ "
+                f"{stats['end_date']}）还没有饮食记录。",
+            )
+            return
+        yield (event.make_result().message(weekly_report(stats)).use_markdown(True))
+
+    @calorie.command("订阅")
+    async def subscribe(
+        self, event: AstrMessageEvent, action: str = "状态", time: str = ""
+    ):
+        """订阅每日饮食总结与每周体重提醒（到点自动推送）。"""
+        text = await self.reminders.handle_subscribe(event, action, time)
+        yield plain_result(event, text)
 
     @calorie.command("撤销")
     async def undo(self, event: AstrMessageEvent, date: str = ""):
@@ -291,6 +338,21 @@ class DailyCalorieIntakePlugin(Star):
             event, store=self.store, now=self._now, date=date
         )
 
+    @filter.llm_tool(name="get_weekly_stats")
+    async def weekly_stats_tool(self, event: AstrMessageEvent, days: int = 7) -> str:
+        """统计用户最近几天的热量摄入情况（周报）。
+
+        当用户询问最近一段时间的饮食总量、日均摄入、达标情况或趋势时调用，
+        例如"我这周吃得怎么样""最近一周日均多少"。返回的数据是精确统计值，
+        不得修改或编造，只负责结合人设组织语言。
+
+        Args:
+            days(number): 统计天数，取 1～30，缺省 7。
+        """
+        return await tools.weekly_stats_summary(
+            event, store=self.store, now=self._now, days=days
+        )
+
     @filter.llm_tool(name="undo_daily_calorie_record")
     async def undo_record_tool(
         self, event: AstrMessageEvent, selector: str = "", date: str = "today"
@@ -383,6 +445,20 @@ class DailyCalorieIntakePlugin(Star):
             await event.send(
                 plain_result(event, "已记录这次饮食，但 AI 回复生成失败。")
             )
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=20)
+    async def deliver_due_reminders(self, event: AstrMessageEvent):
+        """到点补发：订阅用户的下一次发言会补上错过的总结/提醒。
+
+        用于覆盖定时推送失败的场景（平台无 msg_id、主动消息配额不足、
+        AstrBot 重启期间错过等）。此时用户消息刚到达，回复一定发得出去。
+        """
+        state_key = self.store.state_key(event)
+        await self.reminders.deliver(state_key, event.unified_msg_origin, event=event)
+
+    async def initialize(self) -> None:
+        """插件加载后恢复持久化订阅任务（重启会丢失 basic 任务的 handler）。"""
+        await self.reminders.restore_jobs()
 
     async def terminate(self) -> None:
         """插件卸载时释放内存中的锁对象（锁已下沉到 store）。"""

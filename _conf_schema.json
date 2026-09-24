@@ -22,5 +22,23 @@
     "type": "int",
     "hint": "超出后自动丢弃最旧的记录，取值 1～100000，默认 1000。新上限立即生效；若调小上限，超出限制的旧记录会在该用户下一次写入时被清理",
     "default": 1000
+  },
+  "daily_summary_time": {
+    "description": "每日饮食总结的默认时间",
+    "type": "string",
+    "hint": "订阅提醒的默认推送时间，格式 HH:MM（24 小时制），默认 21:00。用户在 /热量 订阅 开启 时可单独指定自己的时间。",
+    "default": "21:00"
+  },
+  "weight_check_weekday": {
+    "description": "每周体重检查日",
+    "type": "int",
+    "hint": "每周在这一天检查近 7 天累计缺口/超标并提示更新体重，1=周一 … 7=周日，默认 7（周日）。",
+    "default": 7
+  },
+  "weight_check_threshold": {
+    "description": "体重提醒的累计缺口/超标阈值（kcal）",
+    "type": "int",
+    "hint": "近 7 天累计缺口或超标达到该值才提示更新体重，默认 3500 kcal（约 0.45 kg 脂肪）。",
+    "default": 3500
   }
 }

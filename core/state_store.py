@@ -85,7 +85,13 @@ class UserStateStore:
     @asynccontextmanager
     async def locked(self, event: AstrMessageEvent):
         """按用户加锁的异步上下文，串行化该用户的读-改-写序列。"""
-        async with self._locks.setdefault(self.state_key(event), asyncio.Lock()):
+        async with self.locked_by_key(self.state_key(event)):
+            yield
+
+    @asynccontextmanager
+    async def locked_by_key(self, key: str):
+        """按存储键加锁（供定时任务等无 event 的场景使用）。"""
+        async with self._locks.setdefault(key, asyncio.Lock()):
             yield
 
     async def update(
@@ -128,7 +134,11 @@ class UserStateStore:
         KV 中可能存在旧版本或损坏的数据，这里统一校正类型，
         保证后续读写不会因结构异常而崩溃。
         """
-        state = await self._get_kv_data(self.state_key(event), {})
+        return await self.load_by_key(self.state_key(event))
+
+    async def load_by_key(self, key: str) -> dict[str, Any]:
+        """按存储键加载并归一化状态（供定时任务等无 event 的场景使用）。"""
+        state = await self._get_kv_data(key, {})
         if not isinstance(state, dict):
             state = {}
         if not isinstance(state.get("profile"), dict):
@@ -144,6 +154,17 @@ class UserStateStore:
             state["entries"] = []
         state.pop("auto_mode", None)
         state.pop("pending", None)
+        # 订阅信息缺失或损坏时归一化为“未订阅”。
+        subscription = state.get("subscription")
+        if not isinstance(subscription, dict):
+            subscription = {}
+        state["subscription"] = {
+            "enabled": bool(subscription.get("enabled")),
+            "time": subscription.get("time"),
+            "job_id": subscription.get("job_id"),
+            "last_daily_date": subscription.get("last_daily_date"),
+            "last_weight_check": subscription.get("last_weight_check"),
+        }
         # 为缺少 ID 的历史记录补一个由内容派生的稳定 ID。
         for entry in state["entries"]:
             if not isinstance(entry, dict):
@@ -174,12 +195,16 @@ class UserStateStore:
         写入前按配置裁剪记录条数（超出后丢弃最旧的），
         保证任何写路径都不会让 KV 无限膨胀。
         """
+        await self.save_by_key(self.state_key(event), state)
+
+    async def save_by_key(self, key: str, state: dict[str, Any]) -> None:
+        """按存储键保存状态（供定时任务等无 event 的场景使用）。"""
         entries = state.get("entries")
         if isinstance(entries, list):
             limit = self._max_entries()
             if len(entries) > limit:
                 state["entries"] = entries[-limit:]
-        await self._put_kv_data(self.state_key(event), state)
+        await self._put_kv_data(key, state)
 
     async def clear(self, event: AstrMessageEvent) -> None:
         """删除该用户的全部状态数据（档案与记录），用于“重新开始”。"""
