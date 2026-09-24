@@ -28,9 +28,10 @@ DEFAULT_MAX_ENTRIES = 1000
 MIN_ENTRIES_LIMIT = 1
 MAX_ENTRIES_LIMIT = 100000
 
-# 交互式会话超时（秒）：建档/配置对话用同一超时，撤销选择单独一个
+# 交互式会话超时（秒）：建档/配置对话用同一超时；撤销选择、清空确认等
+# 破坏性/短交互共用更短的超时
 SESSION_TIMEOUT = 180
-UNDO_SESSION_TIMEOUT = 120
+CONFIRM_SESSION_TIMEOUT = 120
 
 # 文本长度限制（字符）
 MAX_DESCRIPTION_LENGTH = 200
@@ -45,3 +46,15 @@ WEIGHT_MIN, WEIGHT_MAX = 30, 300
 
 # 模型估算可信度枚举
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
+
+# 文字补记允许回溯的最大天数（如“昨天晚饭忘了记”）
+BACKFILL_MAX_DAYS = 7
+
+# 记录来源的中文标签（用于 CSV 导出等展示场景）
+SOURCE_LABELS = {"image": "图片识别", "text": "文字记录", "manual": "手动记录"}
+
+# 单项营养素（蛋白质/碳水/脂肪）的合理上限（克），防止模型输出异常值
+MAX_MACRO_GRAMS = 1000
+
+# 文本版账单（文件发送失败降级）最多展示的记录条数，避免刷屏
+TEXT_BILL_MAX_ENTRIES = 20

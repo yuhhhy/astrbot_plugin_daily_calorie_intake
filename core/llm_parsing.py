@@ -15,9 +15,45 @@ from .constants import (
     CONFIDENCE_LEVELS,
     MAX_CALORIES,
     MAX_DESCRIPTION_LENGTH,
+    MAX_MACRO_GRAMS,
     MAX_NOTES_LENGTH,
     MIN_CALORIES,
 )
+
+
+def coerce_float(value: Any) -> float:
+    """把模型给出的数值宽容地转成 float（布尔同样拒绝）。
+
+    其他类型抛出 ``ValueError``。
+    """
+    if isinstance(value, bool):
+        raise ValueError("Expected a number, got a boolean")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Expected a number, got an empty string")
+        try:
+            return float(stripped)
+        except ValueError:
+            raise ValueError(f"Expected a number, got {value!r}") from None
+    raise ValueError(f"Expected a number, got {type(value).__name__}")
+
+
+def normalize_macro_grams(value: Any) -> float:
+    """把模型给出的营养素数值归一化为克。
+
+    缺省或无法解析时按 0 处理（营养素是补充信息，不应让记录失败），
+    负值钳为 0，超高钳到 ``MAX_MACRO_GRAMS``。
+    """
+    if value is None:
+        return 0.0
+    try:
+        grams = coerce_float(value)
+    except ValueError:
+        return 0.0
+    return round(min(max(0.0, grams), MAX_MACRO_GRAMS), 1)
 
 
 def coerce_int(value: Any) -> int:
@@ -98,8 +134,14 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
         confidence = "low"
     return {
         "is_food": True,
-        "description": str(payload.get("description", "食物图片"))[:MAX_DESCRIPTION_LENGTH],
+        "description": str(payload.get("description", "食物图片"))[
+            :MAX_DESCRIPTION_LENGTH
+        ],
         "calories": calories,
+        # 三大宏量营养素（克）；旧模型输出可能缺失，缺省为 0。
+        "protein": normalize_macro_grams(payload.get("protein")),
+        "carbs": normalize_macro_grams(payload.get("carbs")),
+        "fat": normalize_macro_grams(payload.get("fat")),
         # 区间钳制到全局支持的 [0, MAX_CALORIES] 范围。
         "lower_bound": max(0, lower),
         "upper_bound": min(MAX_CALORIES, upper),
