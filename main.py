@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import astrbot.api.message_components as Comp
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.session_waiter import (
@@ -28,14 +28,8 @@ ACTIVITY_LEVELS = {
 
 GOALS = {"1": "减重", "2": "维持", "3": "增重"}
 
-# 统一使用 UTC+8（Asia/Shanghai，中国无夏令时）作为“今天”的日期边界，
-# 避免服务器时区（常见为 UTC）导致记录被划到错误的日期。
-_LOCAL_TZ = timezone(timedelta(hours=8))
-
-
-def _now() -> datetime:
-    """Return the current local datetime in the canonical timezone."""
-    return datetime.now(_LOCAL_TZ)
+# “今天”的日期边界默认使用 UTC+8（Asia/Shanghai，中国无夏令时），避免服务器时区
+# （常见为 UTC）导致记录被划到错误的日期；可在 WebUI 插件配置中调整时区偏移。
 
 
 def _plain_result(event: AstrMessageEvent, text: str):
@@ -208,14 +202,44 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
     "astrbot_plugin_daily_calorie_intake",
     "yuhhhy",
     "通过多模态模型与对话描述估算并记录每日热量摄入",
-    "1.3.0",
+    "1.3.1",
 )
 class DailyCalorieIntakePlugin(Star):
     """Track per-user calorie targets and food-image estimates."""
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
+        self.config = config if isinstance(config, dict) else {}
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def _config_value(self, key: str, default: Any) -> Any:
+        """Read a plugin config value, falling back to the default safely.
+
+        Args:
+            key: Config key defined in ``_conf_schema.json``.
+            default: Value to use when the config is missing or ``None``.
+
+        Returns:
+            The configured value, read live so WebUI edits apply at once.
+        """
+        try:
+            value = self.config.get(key, default)
+        except AttributeError:
+            return default
+        return default if value is None else value
+
+    def _timezone(self) -> timezone:
+        """Build the timezone used for date boundaries from config."""
+        try:
+            offset = int(self._config_value("timezone_offset", 8))
+        except (TypeError, ValueError):
+            offset = 8
+        offset = max(-12, min(14, offset))
+        return timezone(timedelta(hours=offset))
+
+    def _now(self) -> datetime:
+        """Return the current datetime in the configured timezone."""
+        return datetime.now(self._timezone())
 
     def _state_key(self, event: AstrMessageEvent) -> str:
         """Build a stable, privacy-preserving per-user storage key.
@@ -246,7 +270,9 @@ class DailyCalorieIntakePlugin(Star):
         if not isinstance(state.get("profile"), dict):
             state["profile"] = None
         if "recording_enabled" not in state:
-            state["recording_enabled"] = True
+            state["recording_enabled"] = bool(
+                self._config_value("default_recording_enabled", True)
+            )
         state.pop("auto_record", None)
         if not isinstance(state.get("entries"), list):
             state["entries"] = []
@@ -282,13 +308,13 @@ class DailyCalorieIntakePlugin(Star):
 
         Args:
             state: Complete user state.
-            now: Optional timestamp to use as "now"; defaults to ``_now()``.
+            now: Optional timestamp to use as "now"; defaults to ``self._now()``.
 
         Returns:
             Local date, total intake, and remaining target.
         """
         if now is None:
-            now = _now()
+            now = self._now()
         date = now.date().isoformat()
         total = sum(
             int(entry.get("calories", 0))
@@ -429,7 +455,7 @@ class DailyCalorieIntakePlugin(Star):
             )
             answers["tdee"] = tdee
             answers["target"] = target
-            answers["updated_at"] = _now().isoformat()
+            answers["updated_at"] = self._now().isoformat()
             state = await self._load_state(next_event)
             state["profile"] = answers
             await self._save_state(next_event, state)
@@ -583,7 +609,7 @@ class DailyCalorieIntakePlugin(Star):
             )
             profile["tdee"] = tdee
             profile["target"] = target
-            profile["updated_at"] = _now().isoformat()
+            profile["updated_at"] = self._now().isoformat()
             key = self._state_key(next_event)
             async with self._locks.setdefault(key, asyncio.Lock()):
                 fresh_state = await self._load_state(next_event)
@@ -646,7 +672,7 @@ class DailyCalorieIntakePlugin(Star):
     async def undo(self, event: AstrMessageEvent):
         """列出今天的记录，并通过后续对话选择要撤销的一笔。"""
         state = await self._load_state(event)
-        today = _now().date().isoformat()
+        today = self._now().date().isoformat()
         entries = [entry for entry in state["entries"] if entry.get("date") == today]
         if not entries:
             yield _plain_result(event, "今天还没有可撤销的热量记录。")
@@ -807,7 +833,7 @@ class DailyCalorieIntakePlugin(Star):
                 return "用户尚未建立热量档案，未记录。请先让用户发送 /热量 开始。"
             if not state["recording_enabled"]:
                 return "热量记录当前已关闭，未记录。请让用户发送 /自动记录 开启 后重试。"
-            now = _now()
+            now = self._now()
             entry = {
                 "id": uuid.uuid4().hex[:8],
                 "date": now.date().isoformat(),
@@ -850,7 +876,7 @@ class DailyCalorieIntakePlugin(Star):
             return "用户尚未建立热量档案。"
         date = (date or "today").lower()
         if date in {"today", "今天"}:
-            date = _now().date().isoformat()
+            date = self._now().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             return "日期格式无效，请使用 today 或 YYYY-MM-DD。"
         entries = [entry for entry in state["entries"] if entry.get("date") == date]
@@ -877,7 +903,7 @@ class DailyCalorieIntakePlugin(Star):
             return "未指定要撤销的记录。请先调用 list_daily_calorie_records。"
         date = (date or "today").lower()
         if date in {"today", "今天"}:
-            date = _now().date().isoformat()
+            date = self._now().date().isoformat()
         elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             return "日期格式无效，请使用 today 或 YYYY-MM-DD。"
         key = self._state_key(event)
@@ -976,7 +1002,7 @@ class DailyCalorieIntakePlugin(Star):
         if not analysis["is_food"]:
             return
 
-        now = _now()
+        now = self._now()
         entry = {
             "id": uuid.uuid4().hex[:8],
             "date": now.date().isoformat(),
@@ -1006,6 +1032,23 @@ class DailyCalorieIntakePlugin(Star):
             await self._save_state(event, state)
 
         date, total, remaining = self._today_summary(state, now)
+        remaining_text = (
+            f"还可摄入约 {remaining} kcal"
+            if remaining >= 0
+            else f"已超过目标约 {-remaining} kcal"
+        )
+
+        if not self._config_value("image_ai_reply", True):
+            # 关闭 AI 回复：只回纯文本摘要，并终止事件避免聊天管线再次响应图片。
+            event.stop_event()
+            yield _plain_result(event,
+                f"已记录：{analysis['description']}，约 {analysis['calories']} kcal"
+                f"（区间 {analysis['lower_bound']}～{analysis['upper_bound']}）。"
+                f"今日累计 {total} kcal，目标 {state['profile']['target']} kcal，"
+                f"{remaining_text}。"
+            )
+            return
+
         today_entries = [
             {
                 "description": saved.get("description", "饮食记录"),

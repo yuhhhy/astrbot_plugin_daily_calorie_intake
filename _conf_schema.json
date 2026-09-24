@@ -1,0 +1,22 @@
+{
+  "timezone_offset": {
+    "description": "日期边界时区偏移（小时）",
+    "type": "int",
+    "hint": "判定“今天”的时区偏移，默认 UTC+8（中国标准时间，无夏令时）。取值范围 -12 ～ +14，修改后立即生效。",
+    "default": 8,
+    "obvious_hint": true
+  },
+  "default_recording_enabled": {
+    "description": "新用户默认开启热量记录",
+    "type": "bool",
+    "hint": "关闭后，新建档的用户需要发送 /自动记录 开启 才会开始记录热量。",
+    "default": true,
+    "obvious_hint": true
+  },
+  "image_ai_reply": {
+    "description": "图片识别后生成 AI 个性化回复",
+    "type": "bool",
+    "hint": "开启后，食物图片入账由 AI 结合用户档案与当日记录生成回复；关闭则仅回复纯文本摘要，节省 token。",
+    "default": true
+  }
+}
