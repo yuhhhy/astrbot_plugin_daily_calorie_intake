@@ -1,6 +1,26 @@
+<div align="center">
+
 # 每日热量助手
 
-一个使用 AstrBot 当前聊天模型的多模态能力分析食物图片、通过对话记录文字饮食、自动记录每日摄入并计算剩余热量的插件。
+一个面向 AstrBot 的饮食记录插件：用当前会话的多模态模型识别食物图片，也支持对话描述文字饮食，自动估算热量与蛋白质/碳水/脂肪，并按日汇总剩余额度、生成周报与定时提醒。
+
+![AstrBot](https://img.shields.io/badge/AstrBot-plugin-5865f2?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.4.1-22c55e?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-AstrBot%20%E5%85%A8%E5%B9%B3%E5%8F%B0-f97316?style=flat-square)
+![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square)
+
+<br>
+<img src="logo.png" alt="每日热量助手 Logo" width="180">
+
+</div>
+
+## 目录
+
+- [使用要求](#使用要求)
+- [使用方法](#使用方法)
+- [指令](#指令)
+- [隐私与存储](#隐私与存储)
 
 ## 使用要求
 
