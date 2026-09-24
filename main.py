@@ -207,8 +207,8 @@ def parse_food_analysis(text: str) -> dict[str, Any]:
 @register(
     "astrbot_plugin_daily_calorie_intake",
     "yuhhhy",
-    "通过多模态模型估算并记录每日热量摄入",
-    "1.2.1",
+    "通过多模态模型与对话描述估算并记录每日热量摄入",
+    "1.3.0",
 )
 class DailyCalorieIntakePlugin(Star):
     """Track per-user calorie targets and food-image estimates."""
@@ -442,7 +442,8 @@ class DailyCalorieIntakePlugin(Star):
                 _plain_result(next_event,
                     f"档案已保存。估算每日总消耗约 {tdee} kcal，"
                     f"{answers['goal']}目标为 {target} kcal/天。{sex_note}\n"
-                    "热量记录已默认开启，发送食物图片会自动分析并入账。\n"
+                    "热量记录已默认开启，发送食物图片或直接用文字描述饮食，"
+                    "都会自动分析并入账。\n"
                     "这是日常管理估算，不替代医生或营养师建议。"
                 )
             )
@@ -606,7 +607,7 @@ class DailyCalorieIntakePlugin(Star):
         finally:
             event.stop_event()
 
-    @calorie.command("今天")
+    @calorie.command("今日")
     async def today(self, event: AstrMessageEvent):
         """查看今日摄入和剩余热量。"""
         state = await self._load_state(event)
@@ -640,41 +641,6 @@ class DailyCalorieIntakePlugin(Star):
         )
         body = f"\n\n{details}" if details else "\n今天还没有饮食记录。"
         yield event.make_result().message(summary + body).use_markdown(True)
-
-    @calorie.command("记录")
-    async def record(self, event: AstrMessageEvent, calories: int):
-        """手动记录一笔热量。"""
-        if not 1 <= calories <= 10000:
-            yield _plain_result(event, "单次热量请输入 1～10000 之间的整数。")
-            return
-        key = self._state_key(event)
-        async with self._locks.setdefault(key, asyncio.Lock()):
-            state = await self._load_state(event)
-            if not state["profile"]:
-                result = "请先发送 /热量 开始 建立个人档案。"
-            elif not state["recording_enabled"]:
-                result = "热量记录当前已关闭。发送 /自动记录 开启 后再记录。"
-            else:
-                now = _now()
-                state["entries"].append(
-                    {
-                        "id": uuid.uuid4().hex[:8],
-                        "date": now.date().isoformat(),
-                        "created_at": now.isoformat(),
-                        "description": "手动记录",
-                        "calories": calories,
-                        "source": "manual",
-                    }
-                )
-                state["entries"] = state["entries"][-1000:]
-                await self._save_state(event, state)
-                _, total, remaining = self._today_summary(state, now)
-                result = f"已记录 {calories} kcal。今日累计 {total} kcal，" + (
-                    f"还可摄入约 {remaining} kcal。"
-                    if remaining >= 0
-                    else f"已超过目标约 {-remaining} kcal。"
-                )
-        yield _plain_result(event, result)
 
     @calorie.command("撤销")
     async def undo(self, event: AstrMessageEvent):
@@ -770,8 +736,7 @@ class DailyCalorieIntakePlugin(Star):
                 state["recording_enabled"] = True
                 await self._save_state(event, state)
             yield _plain_result(event,
-                "热量记录已开启。手动记录和食物图片分析均可使用；"
-                "食物图片识别成功后会自动入账。"
+                "热量记录已开启。文字描述饮食和食物图片均可自动分析入账。"
             )
         elif action in {"关闭", "关"}:
             key = self._state_key(event)
@@ -780,18 +745,96 @@ class DailyCalorieIntakePlugin(Star):
                 state["recording_enabled"] = False
                 await self._save_state(event, state)
             yield _plain_result(event,
-                "热量记录已关闭。不会新增手动记录，也不会分析或记录食物图片；"
+                "热量记录已关闭。文字描述和食物图片都不会再分析或入账；"
                 "已有记录仍可查询和撤销。"
             )
         elif action == "状态":
             enabled = "已开启" if state["recording_enabled"] else "已关闭"
             yield _plain_result(event,
-                f"热量记录{enabled}；开启时食物图片会自动分析并直接入账。"
+                f"热量记录{enabled}；开启时文字描述饮食和食物图片都会自动分析并直接入账。"
             )
         else:
             yield _plain_result(event,
                 "用法：/自动记录 开启、/自动记录 关闭、/自动记录 状态"
             )
+
+    @filter.llm_tool(name="record_daily_calorie_intake")
+    async def record_calorie_tool(
+        self,
+        event: AstrMessageEvent,
+        description: str = "",
+        calories: int = 0,
+        lower_bound: int = 0,
+        upper_bound: int = 0,
+        confidence: str = "",
+    ) -> str:
+        """记录用户通过文字描述的一笔饮食热量。
+
+        当用户以文字描述自己已经吃下或正在吃的食物、并希望记入每日热量时调用，
+        例如"我午饭吃了一碗牛肉面，帮我记一下"。调用前先根据描述的分量和烹饪
+        方式估算整餐热量。用户只是在询问热量而没有记录意愿，或描述的不是用户
+        本人的饮食时，不要调用。是否入账以本工具的返回结果为准。
+
+        Args:
+            description(string): 食物与分量的简短描述，例如"一碗牛肉面加一个鸡蛋"。
+            calories(number): 估算的整餐总热量，单位 kcal，取 1～10000 的整数。
+            lower_bound(number): 估算热量下限，单位 kcal；不确定时与 calories 相同。
+            upper_bound(number): 估算热量上限，单位 kcal；不确定时与 calories 相同。
+            confidence(string): 估算可信度：high、medium 或 low。
+        """
+        clean_description = (description or "").strip()[:200] or "饮食记录"
+        try:
+            calories = _coerce_int(calories)
+        except ValueError:
+            return "calories 必须是 1～10000 之间的整数，本次未记录。"
+        if not 1 <= calories <= 10000:
+            return "calories 必须是 1～10000 之间的整数，本次未记录。"
+        try:
+            lower = _coerce_int(lower_bound) if lower_bound else calories
+            upper = _coerce_int(upper_bound) if upper_bound else calories
+        except ValueError:
+            lower = upper = calories
+        lower = min(max(0, lower), calories)
+        upper = max(calories, min(10000, upper))
+        conf = (confidence or "").strip().lower()
+        if conf not in {"high", "medium", "low"}:
+            conf = "low"
+
+        key = self._state_key(event)
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            state = await self._load_state(event)
+            if not state["profile"]:
+                return "用户尚未建立热量档案，未记录。请先让用户发送 /热量 开始。"
+            if not state["recording_enabled"]:
+                return "热量记录当前已关闭，未记录。请让用户发送 /自动记录 开启 后重试。"
+            now = _now()
+            entry = {
+                "id": uuid.uuid4().hex[:8],
+                "date": now.date().isoformat(),
+                "created_at": now.isoformat(),
+                "description": clean_description,
+                "calories": calories,
+                "lower_bound": lower,
+                "upper_bound": upper,
+                "confidence": conf,
+                "source": "text",
+            }
+            state["entries"].append(entry)
+            state["entries"] = state["entries"][-1000:]
+            await self._save_state(event, state)
+
+        date, total, remaining = self._today_summary(state, now)
+        remaining_text = (
+            f"还可摄入约 {remaining} kcal"
+            if remaining >= 0
+            else f"已超过目标约 {-remaining} kcal"
+        )
+        return (
+            f"已记录：{clean_description}，约 {calories} kcal"
+            f"（区间 {lower}～{upper}，可信度 {conf}），记录 ID {entry['id']}。"
+            f"{date} 今日累计 {total} kcal，目标 {state['profile']['target']} kcal，"
+            f"{remaining_text}。"
+        )
 
     @filter.llm_tool(name="list_daily_calorie_records")
     async def list_records_tool(
