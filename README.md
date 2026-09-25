@@ -5,7 +5,7 @@
 一个面向 AstrBot 的饮食记录插件：用当前会话的多模态模型识别食物图片，也支持对话描述文字饮食，自动估算热量与蛋白质/碳水/脂肪，并按日汇总剩余额度、生成周报与定时提醒。
 
 ![AstrBot](https://img.shields.io/badge/AstrBot-plugin-5865f2?style=flat-square)
-![Version](https://img.shields.io/badge/version-1.4.1-22c55e?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.4.2-22c55e?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-AstrBot%20%E5%85%A8%E5%B9%B3%E5%8F%B0-f97316?style=flat-square)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-3b82f6?style=flat-square)

@@ -170,7 +170,7 @@ async def analyze_and_record(
     if duplicate:
         return None
 
-    date, total, remaining = store.date_summary(state, current)
+    date, total, remaining = store.today_summary(state, current)
     remaining_text = (
         f"还可摄入约 {remaining} kcal"
         if remaining >= 0

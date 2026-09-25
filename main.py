@@ -56,7 +56,7 @@ from .core.stats import weekly_stats
     PLUGIN_ID,
     "yuhhhy",
     "通过多模态模型与对话描述估算并记录每日热量摄入",
-    "1.4.1",
+    "1.4.2",
 )
 class DailyCalorieIntakePlugin(Star):
     """按用户维护热量档案，自动识别食物图片与文字描述并记录每日摄入。
